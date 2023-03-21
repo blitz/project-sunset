@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+
+from geopy.geocoders import Nominatim
+from geographiclib.geodesic import Geodesic
+import requests
+import ephem
+import math
+from math import asin, cos, sin, radians, atan2, degrees
+import folium
+
+import overpy
+
+# Mallorca Area ID
+#island_osm_id = 3606803636
+island_relation_id = 6803636
+
+geolocator = Nominatim(user_agent="my_application")
+
+url = f"https://www.openstreetmap.org/api/0.6/relation/{island_relation_id}/full.json"
+response = requests.get(url)
+relation_data = response.json()
+    
+coordinates = []
+for member in relation_data['elements']:
+    if member['type'] == 'node':
+        lat = member['lat']
+        lon = member['lon']
+        coordinates.append((lat, lon))
+
+# We round bearings to multiples of this many degrees.
+precision = 5
+
+all_bearings = set(range(-180, 180, precision))
+
+
+sunset_coordinates = []
+
+for i in range(0, len(coordinates), 25):
+    # All bearings with stuff.
+    occupied_bearings = set()
+
+    for j in range(0, len(coordinates), 10):
+        g = Geodesic.WGS84.Inverse(coordinates[i][0], coordinates[i][1],
+                                   coordinates[j][0], coordinates[j][1])
+        # print(f"{coordinates[i]} -> {coordinates[j]}: distance {g['s12']:.0f}m bearing {g['azi1']:.0f}")
+        occupied_bearings.add(round(g['azi1'] / precision) * precision)
+
+    free_bearings = all_bearings - occupied_bearings
+    
+    s = ephem.Sun()
+    o = ephem.Observer()
+    o.lat = coordinates[i][0]
+    o.lon = coordinates[j][0]
+    o.elevation = 0
+    o.date = ephem.Date('2023/03/21 19:00:00')
+
+    s.compute(o)
+
+    azimuth = math.degrees(s.az)
+    altitude = math.degrees(s.alt)
+    lat_rad = math.radians(float(lat))
+    azimuth_rad = math.radians(azimuth)
+    h = math.sin(azimuth_rad) * math.cos(lat_rad)
+    a = math.cos(lat_rad) * math.sin(math.radians(altitude)) - math.sin(lat_rad) * math.cos(math.radians(altitude)) * math.cos(azimuth_rad)
+    angle = math.atan2(h, a)
+
+    # Convert the azimuth angle to a bearing angle
+    if float(lat) > 0:
+        bearing = (90 - math.degrees(angle)) % 360
+    else:
+        bearing = (270 + math.degrees(angle)) % 360
+
+    if bearing >= 180:
+        bearing -= 360
+
+    if round(bearing / precision) * precision in free_bearings:
+        print("Sunset!")
+        sunset_coordinates.append((bearing, coordinates[i]))
+
+    print(f"{i}/{len(coordinates)}: {coordinates[i]}: {bearing} in {free_bearings}")        
+
+
+# Create a map centered at a specific location
+m = folium.Map(location=[sum(c[0] for c in coordinates)/len(coordinates),
+                         sum(c[1] for c in coordinates)/len(coordinates)], zoom_start=10)
+
+for (bearing, start) in sunset_coordinates:
+    folium.CircleMarker(location=start, radius = 1).add_to(m)
+
+    distance = 1 # 1 kilometer
+    radius_earth = 6371 # kilometers
+    lat1, lon1 = radians(start[0]), radians(start[1])
+    lat2 = asin(sin(lat1)*cos(distance/radius_earth) + cos(lat1)*sin(distance/radius_earth)*cos(radians(bearing)))
+    lon2 = lon1 + atan2(sin(radians(bearing))*sin(distance/radius_earth)*cos(lat1), cos(distance/radius_earth)-sin(lat1)*sin(lat2))
+    lat2, lon2 = degrees(lat2), degrees(lon2)
+    end = [lat2, lon2]
+    folium.PolyLine(locations=[start, end], color='red').add_to(m)
+
+
+# Save the map to an HTML file
+m.save('map.html')
